@@ -65,6 +65,7 @@ static const uint32_t devopts[] = {
 	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_NUM_VDIV | SR_CONF_GET,
 	SR_CONF_TRIGGER_LEVEL | SR_CONF_GET | SR_CONF_SET,
+	// SR_CONF_COUPLING,  SR_CONF_TRIGGER_MATCH
 };
 
 static const uint32_t devopts_cg[] = {
@@ -637,6 +638,7 @@ static int config_list(uint32_t key, GVariant **data,
 	return SR_OK;
 }
 
+// See hmo_receive_data
 static void send_chunk(struct sr_dev_inst *sdi, unsigned char *buf,
 		int num_samples)
 {
@@ -776,6 +778,11 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 		sr_dbg("End of frame, sending %d pre-trigger buffered samples.",
 			devc->samp_buffered);
 		send_chunk(sdi, devc->framebuf, devc->samp_buffered);
+		memset(devc->framebuf, 0,
+				devc->framesize * 
+				((devc->ch_enabled[0] ? 1 : 0) + 
+				 (devc->ch_enabled[1] ? 1 : 0))
+				* 2);
 		g_free(devc->framebuf);
 		devc->framebuf = NULL;
 
