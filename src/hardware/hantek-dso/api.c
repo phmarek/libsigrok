@@ -818,6 +818,7 @@ static int handle_event(int fd, int revents, void *cb_data)
 	di = sdi->driver;
 	drvc = di->context;
 	devc = sdi->priv;
+	// Only on first capture?
 	if (devc->dev_state == STOPPING) {
 		/* We've been told to wind up the acquisition. */
 		sr_dbg("Stopping acquisition.");
