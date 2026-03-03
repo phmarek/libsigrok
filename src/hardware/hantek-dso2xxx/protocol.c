@@ -37,6 +37,8 @@
  * header to detect the next waveform.
  */
 
+#include "protocol.h"
+
 #include <config.h>
 #include <errno.h>
 #include <string.h>
@@ -44,15 +46,16 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <locale.h>
 #include <netinet/tcp.h>
 #include <glib.h>
+#include <stdlib.h>
 #include <libsigrok/libsigrok.h>
 #include "libsigrok-internal.h"
-#include "protocol.h"
 
-/* --------------------------------------------------------------------------
- * Helpers
- * -------------------------------------------------------------------------- */
+
+locale_t hantek_dso2xxx_c_locale;
+
 
 /**
  * Perform a full blocking read of exactly @p len bytes into @p buf.
@@ -81,9 +84,25 @@ static int tcp_read_all(int fd, void *buf, size_t len)
 	return SR_OK;
 }
 
-/* --------------------------------------------------------------------------
- * Public API
- * -------------------------------------------------------------------------- */
+SR_PRIV void send_session_update(const struct sr_dev_inst *sdi,
+		int what, GVariant *value)
+{
+    struct sr_datafeed_packet packet;
+    struct sr_datafeed_meta   meta;
+    struct sr_config         *cfg;
+
+    cfg = sr_config_new(what, value);
+
+    meta.config = g_slist_append(NULL, cfg);
+
+    packet.type    = SR_DF_META;
+    packet.payload = &meta;
+
+    sr_session_send(sdi, &packet);
+
+    g_slist_free(meta.config);
+    sr_config_free(cfg);
+}
 
 /**
  * Open a TCP connection to the scope.
@@ -134,6 +153,49 @@ SR_PRIV int hantek_dso2xxx_tcp_connect(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
+SR_PRIV int hantek_dso2xxx_timeout(struct dev_context *devc)
+{
+	fd_set fds = { 0 };
+	struct timeval timeout = { .tv_sec = 1, .tv_usec = 0 }; /* TODO: configurable? */
+
+	FD_SET(devc->sockfd, &fds);
+	if (select(devc->sockfd+1, &fds, NULL, NULL, &timeout) == 1)
+		return SR_OK;
+	return SR_ERR;
+}
+
+SR_PRIV int hantek_dso2xxx_acq_now(struct dev_context *devc)
+{
+	const char now[] = "now\r\n";
+	const int len = sizeof(now) -1;
+
+	if (write(devc->sockfd, now, len) != len)
+		return SR_ERR;
+	return SR_OK;
+}
+
+/* Do a time sync */
+SR_PRIV int hantek_dso2xxx_timesync(struct dev_context *devc)
+{
+	const char thx[] = "thx\r\n";
+	char buffer[32];
+	ssize_t len;
+
+	len = sprintf(buffer, "time %ld\n", time(NULL));
+	if (write(devc->sockfd, buffer, len) != len)
+		return SR_ERR;
+	
+	if (hantek_dso2xxx_timeout(devc) != SR_OK)
+		return SR_ERR;
+
+	len = read(devc->sockfd, buffer, sizeof(buffer)-1);
+	/* Don't check ==, there may be an additional NUL byte */
+	if (len < (long)sizeof(thx) -1)
+		return SR_ERR;
+
+	return (strncmp(buffer, thx, len) == 0) ? SR_OK : SR_ERR_DATA;
+}
+
 /**
  * Close the TCP connection.
  */
@@ -148,6 +210,16 @@ SR_PRIV void hantek_dso2xxx_tcp_close(const struct sr_dev_inst *sdi)
 	}
 }
 
+
+SR_PRIV double atof_for_C_locale(const char *input)
+{
+	return strtod_l(input, NULL, hantek_dso2xxx_c_locale);
+}
+
+/* Writes outside the character vector, but not outside the buffer */
+#define terminate_and_conv(field, fn) ( field[ sizeof(field) ] = 0, fn(field) )
+#define terminate_and_atoi(field) (terminate_and_conv(field, atoi))
+
 /**
  * Read one complete waveform frame from the scope and dispatch
  * SR_DF_ANALOG packets for each enabled channel.
@@ -160,88 +232,109 @@ SR_PRIV int hantek_dso2xxx_receive_frame(const struct sr_dev_inst *sdi)
 {
 	struct dev_context      *devc     = sdi->priv;
 	struct hantek_frame_header hdr;
-	int8_t                  *raw_buf  = NULL;
-	float                   *float_buf = NULL;
+	int8_t byte_buffer[HANTEK_BLOCK_SIZE];
+	float                   *float_buf[HANTEK_CHANNELS] = {};
 	int                      ret      = SR_ERR;
-	uint32_t                 ns;
 	size_t                   ch_bytes;
-	uint32_t                 i;
+	uint32_t channels, sample_nr, ch;
+	int i, pos;
+	struct sr_channel *channel;
+	struct sr_datafeed_packet  pkt;
+	struct sr_datafeed_analog  analog;
+	struct sr_analog_encoding  enc;
+	struct sr_analog_meaning   meaning;
+	struct sr_analog_spec      spec;
+	GSList *chl = NULL;
 
 	/* ------------------------------------------------------------------ *
 	 * 1.  Read and validate the frame header.                             *
 	 * ------------------------------------------------------------------ */
 	if (tcp_read_all(devc->sockfd, &hdr, sizeof(hdr)) != SR_OK) {
-		sr_err("Failed to read frame header.");
+		sr_err(LOG_PREFIX "Failed to read frame header.");
 		return SR_ERR_IO;
 	}
 
-	if (GUINT32_FROM_LE(hdr.magic) != HANTEK_FRAME_MAGIC_LE) {
-		sr_err("Bad frame magic: 0x%08X (expected 0x%08X)",
-		       GUINT32_FROM_LE(hdr.magic), HANTEK_FRAME_MAGIC_LE);
+	if (hdr.magic[0] != '#' ||
+			hdr.magic[1] != '9') {
+		sr_err(LOG_PREFIX "Bad frame magic: 0x%02X 0x%02X",
+		       hdr.magic[0], hdr.magic[1]);
 		return SR_ERR_DATA;
 	}
 
-	/* Byte-swap all fields from little-endian to host order. */
-	ns = GUINT32_FROM_LE(hdr.num_samples);
-	if (ns == 0 || ns > 8 * 1024 * 1024) {
-		sr_err("Implausible sample count: %u", ns);
-		return SR_ERR_DATA;
+	channels = 0;
+
+	/* Needs to be in last-to-first order as atoi needs NUL-terminated input!
+	 * (strtol does, too, and sscanf with field lengths tries locales and
+	 * other stuff we don't want.) */
+
+	devc->sample_rate = terminate_and_conv(hdr.sample_rate, atof_for_C_locale);
+	devc->sample_period = 1.0/devc->sample_rate;
+
+	send_session_update(sdi,
+			SR_CONF_SAMPLERATE,
+			g_variant_new_uint64(devc->sample_rate));
+
+	for(i = HANTEK_CHANNELS-1; i>= 0; i--) {
+		devc->ch_enabled[i] = hdr.ch_enable[i] == '1';
+		if (devc->ch_enabled[i])
+			channels++;
 	}
 
-	/*
-	 * The float fields are transmitted in the endianness of the scope's
-	 * ARM CPU (little-endian).  On little-endian hosts this is a no-op;
-	 * on big-endian hosts we byte-swap via the 32-bit integer trick.
-	 */
-#if G_BYTE_ORDER == G_BIG_ENDIAN
-	{
-		uint32_t tmp;
-# define BSWAP_FLOAT(f) do { memcpy(&tmp, &(f), 4); \
-		tmp = GUINT32_SWAP_LE_BE(tmp);         \
-		memcpy(&(f), &tmp, 4); } while (0)
-		BSWAP_FLOAT(hdr.sample_period);
-		BSWAP_FLOAT(hdr.time_per_div);
-		BSWAP_FLOAT(hdr.ch1_scale);
-		BSWAP_FLOAT(hdr.ch2_scale);
-# undef BSWAP_FLOAT
-		hdr.ch1_offset_raw = (int32_t)GUINT32_SWAP_LE_BE(
-		                         (uint32_t)hdr.ch1_offset_raw);
-		hdr.ch2_offset_raw = (int32_t)GUINT32_SWAP_LE_BE(
-		                         (uint32_t)hdr.ch2_offset_raw);
+	for(i = HANTEK_CHANNELS-1; i>= 0; i--) {
+		devc->ch_scale[i] = terminate_and_conv( hdr.ch_voltage[i], atof_for_C_locale);
 	}
-#endif
-
-	/* Cache header metadata in device context for later inspection. */
-	devc->num_samples    = ns;
-	devc->sample_period  = hdr.sample_period;
-	devc->ch1_enabled    = hdr.ch1_enabled;
-	devc->ch2_enabled    = hdr.ch2_enabled;
-	devc->ch1_scale      = hdr.ch1_scale;
-	devc->ch2_scale      = hdr.ch2_scale;
-	devc->ch1_offset_raw = hdr.ch1_offset_raw;
-	devc->ch2_offset_raw = hdr.ch2_offset_raw;
-
-	sr_dbg("Frame: %u samples, period=%.3e s, CH1=%s CH2=%s",
-	       ns, hdr.sample_period,
-	       hdr.ch1_enabled ? "on" : "off",
-	       hdr.ch2_enabled ? "on" : "off");
-
-	/* ------------------------------------------------------------------ *
-	 * 2.  Allocate receive and conversion buffers.                        *
-	 * ------------------------------------------------------------------ */
-	ch_bytes = (size_t)ns * sizeof(int8_t);
-	raw_buf  = g_malloc(ch_bytes);
-	if (!raw_buf) {
-		sr_err("Out of memory allocating raw sample buffer (%zu bytes).",
-		       ch_bytes);
-		return SR_ERR_MALLOC;
+	for(i = HANTEK_CHANNELS-1; i>= 0; i--) {
+		devc->ch_offset[i] = hdr.ch_offset[i][0] | ( hdr.ch_offset[i][1] << 8);
 	}
 
-	float_buf = g_malloc(ns * sizeof(float));
-	if (!float_buf) {
-		sr_err("Out of memory allocating float sample buffer.");
-		g_free(raw_buf);
-		return SR_ERR_MALLOC;
+	devc->num_samples = terminate_and_atoi(hdr.total_length) / channels;
+
+	sr_dbg(LOG_PREFIX "Frame: %u samples, rate=%.3e s, CH1=%s/%.1f%+d CH2=%s/%.1f%+d",
+	       devc->num_samples,
+	       (float)devc->sample_rate,
+	       devc->ch_enabled[0] ? "on" : "off",
+	       devc->ch_scale[0],
+	       devc->ch_offset[0],
+	       devc->ch_enabled[1] ? "on" : "off",
+	       devc->ch_scale[1],
+	       devc->ch_offset[1]);
+
+	for(i = 0; i < HANTEK_CHANNELS; i++) {
+		if (devc->ch_enabled[i]) {
+			float_buf[i] = g_malloc( devc->num_samples * sizeof(float));
+			if (!float_buf[i]) {
+				sr_err("Out of memory allocating sample buffer");
+				return SR_ERR_MALLOC;
+			}
+		}
+	}
+
+	ch_bytes = HANTEK_BLOCK_SIZE / channels;
+
+	for(sample_nr = 0;
+			sample_nr < devc->num_samples;
+			sample_nr += ch_bytes) {
+
+		if (hantek_dso2xxx_timeout(devc) != SR_OK)
+			return SR_ERR;
+
+		if (tcp_read_all(devc->sockfd, byte_buffer, HANTEK_BLOCK_SIZE) != SR_OK) {
+			sr_err(LOG_PREFIX "Failed to read samples.");
+			return SR_ERR_IO;
+		}
+
+		pos = 0;
+		for(ch = 0; ch < HANTEK_CHANNELS; ch++) {
+			if (devc->ch_enabled[ch]) {
+				for(i = 0; i < ch_bytes; i++) {
+					float_buf[ch][sample_nr + i] =
+						(byte_buffer[pos] - devc->ch_offset[ch])
+						* devc->ch_scale[ch] 
+						/ HANTEK_COUNTS_PER_DIV;
+					pos++;
+				}
+			}
+		}
 	}
 
 	/* ------------------------------------------------------------------ *
@@ -253,73 +346,31 @@ SR_PRIV int hantek_dso2xxx_receive_frame(const struct sr_dev_inst *sdi)
 	 * 4.  Process each enabled channel.                                   *
 	 * ------------------------------------------------------------------ */
 
-	/*
-	 * Helper lambda-like macro to read and dispatch one channel.
-	 *
-	 * @param CH_IDX    0-based channel index into sdi->channels
-	 * @param ENABLED   hdr.ch1_enabled / hdr.ch2_enabled
-	 * @param SCALE     hdr.ch1_scale / hdr.ch2_scale
-	 * @param OFFSET    hdr.ch1_offset_raw / hdr.ch2_offset_raw
-	 * @param LABEL     string literal for log messages
-	 */
-#define DISPATCH_CHANNEL(CH_IDX, ENABLED, SCALE, OFFSET, LABEL)         \
-	do {                                                                 \
-		struct sr_channel   *ch;                                     \
-		struct sr_datafeed_packet  pkt;                              \
-		struct sr_datafeed_analog  analog;                           \
-		struct sr_analog_encoding  enc;                              \
-		struct sr_analog_meaning   meaning;                          \
-		struct sr_analog_spec      spec;                             \
-		GSList *chl = NULL;                                          \
-		                                                             \
-		if (!(ENABLED))                                              \
-			break;                                               \
-		                                                             \
-		/* Read raw signed 8-bit samples from the stream. */         \
-		if (tcp_read_all(devc->sockfd, raw_buf, ch_bytes) != SR_OK) { \
-			sr_err("Failed to read " LABEL " samples.");         \
-			ret = SR_ERR_IO;                                     \
-			goto cleanup;                                        \
-		}                                                            \
-		                                                             \
-		/*                                                           \
-		 * Convert raw ADC counts to volts:                          \
-		 *   voltage = (raw - offset_raw) * (scale / counts_per_div) \
-		 */                                                          \
-		for (i = 0; i < ns; i++) {                                   \
-			float_buf[i] =                                       \
-			    ((float)raw_buf[i] - (float)(OFFSET)) *          \
-			    ((SCALE) / (float)HANTEK_COUNTS_PER_DIV);        \
-		}                                                            \
-		                                                             \
-		/* Locate the sr_channel object for this channel index. */   \
-		ch = g_slist_nth_data(sdi->channels, (CH_IDX));             \
-		if (!ch || !ch->enabled) {                                   \
-			sr_dbg(LABEL " not enabled in session, skipping.");  \
-			break;                                               \
-		}                                                            \
-		chl = g_slist_append(NULL, ch);                              \
-		                                                             \
-		sr_analog_init(&analog, &enc, &meaning, &spec, 6);          \
-		meaning.mq      = SR_MQ_VOLTAGE;                             \
-		meaning.unit    = SR_UNIT_VOLT;                              \
-		meaning.mqflags = SR_MQFLAG_DC;                              \
-		meaning.channels = chl;                                      \
-		analog.data      = float_buf;                                \
-		analog.num_samples = ns;                                     \
-		                                                             \
-		pkt.type    = SR_DF_ANALOG;                                  \
-		pkt.payload = &analog;                                       \
-		sr_session_send(sdi, &pkt);                                  \
-		g_slist_free(chl);                                           \
-	} while (0)
+	for(ch = 0; ch < HANTEK_CHANNELS; ch++) {
+		if (devc->ch_enabled[ch]) {
+			/* Locate the sr_channel object for this channel index. */
+			channel = g_slist_nth_data(sdi->channels, ch);
+			if (!channel || !channel->enabled) {
+				sr_dbg(LOG_PREFIX " not enabled in session, skipping.");
+				continue;
+			}
 
-	DISPATCH_CHANNEL(0, hdr.ch1_enabled, hdr.ch1_scale,
-	                 hdr.ch1_offset_raw, "CH1");
-	DISPATCH_CHANNEL(1, hdr.ch2_enabled, hdr.ch2_scale,
-	                 hdr.ch2_offset_raw, "CH2");
+			chl = g_slist_append(NULL, channel);
 
-#undef DISPATCH_CHANNEL
+			sr_analog_init(&analog, &enc, &meaning, &spec, 6);
+			meaning.mq      = SR_MQ_VOLTAGE;
+			meaning.unit    = SR_UNIT_VOLT;
+			meaning.mqflags = SR_MQFLAG_DC;
+			meaning.channels = chl;
+			analog.data      = float_buf[ch];
+			analog.num_samples = devc->num_samples;
+
+			pkt.type    = SR_DF_ANALOG;
+			pkt.payload = &analog;
+			sr_session_send(sdi, &pkt);
+			g_slist_free(chl);
+		}
+	}
 
 	/* ------------------------------------------------------------------ *
 	 * 5.  Send SR_DF_FRAME_END                                            *
@@ -330,7 +381,6 @@ SR_PRIV int hantek_dso2xxx_receive_frame(const struct sr_dev_inst *sdi)
 	ret = SR_OK;
 
 cleanup:
-	g_free(float_buf);
-	g_free(raw_buf);
+//	g_free(float_buf);
 	return ret;
 }
