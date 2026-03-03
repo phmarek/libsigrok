@@ -436,6 +436,12 @@ src_libdrivers_la_SOURCES += \
 	src/hardware/hantek-dso/protocol.c \
 	src/hardware/hantek-dso/api.c
 endif
+if HW_HANTEK_DSO2XXX
+libsigrok_la_SOURCES += \
+	hardware/hantek-dso2xxx/api.c \
+	hardware/hantek-dso2xxx/protocol.c \
+	hardware/hantek-dso2xxx/protocol.h
+endif
 if HW_HP_3457A
 src_libdrivers_la_SOURCES += \
 	src/hardware/hp-3457a/protocol.h \
