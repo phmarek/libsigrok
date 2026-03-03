@@ -1,0 +1,13 @@
+## Makefile.am fragment for the hantek-dso2xxx driver.
+## Add this block to src/hardware/Makefile.am in the libsigrok tree,
+## following the pattern of any other network-connected driver.
+##
+## The driver has no external library dependencies beyond what
+## libsigrok already requires (glib, POSIX sockets).
+
+if HW_HANTEK_DSO2XXX
+libsigrok_la_SOURCES += \
+	hardware/hantek-dso2xxx/api.c \
+	hardware/hantek-dso2xxx/protocol.c \
+	hardware/hantek-dso2xxx/protocol.h
+endif
