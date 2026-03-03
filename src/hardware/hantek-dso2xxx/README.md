@@ -5,6 +5,8 @@ DSO2C15, DSO2D10, DSO2D15) that receives waveform data over TCP using the
 quick-fetch firmware patch by phmarek:
 https://github.com/phmarek/hantek-dso2000-quick-fetch
 
+Initial contents generated via Claude.AI, https://claude.ai/chat/b934e60d-d427-4455-a683-f8793332eb8a.
+
 ---
 
 ## How it works
