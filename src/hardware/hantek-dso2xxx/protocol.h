@@ -29,24 +29,6 @@
  *   [frame_header]  (struct hantek_frame_header, 32 bytes, little-endian)
  *   [ch1_samples]   (num_samples × int8_t, only if ch1_enabled != 0)
  *   [ch2_samples]   (num_samples × int8_t, only if ch2_enabled != 0)
- *
- * The header layout has been inferred from the Perl receiver script:
- *
- *   uint32_t  magic;          // 0x48544B32 = "HTK2"
- *   uint32_t  num_samples;    // number of samples per channel
- *   float     time_per_div;   // seconds per division
- *   float     sample_period;  // seconds between samples  (= 1/samplerate)
- *   uint8_t   ch1_enabled;
- *   uint8_t   ch2_enabled;
- *   uint8_t   _reserved[2];
- *   float     ch1_scale;      // volts per division
- *   float     ch2_scale;
- *   int32_t   ch1_offset_raw; // raw offset (signed ADC units)
- *   int32_t   ch2_offset_raw;
- *
- * Each sample is a signed 8-bit integer in raw ADC units.
- * Conversion:  voltage = (raw_sample - offset_raw) * (scale / 25.0f)
- * (25 ADC counts per division, 8 divisions visible → 200 count full range)
  */
 
 #ifndef LIBSIGROK_HARDWARE_HANTEK_DSO2XXX_PROTOCOL_H
@@ -58,6 +40,38 @@
 #include "libsigrok-internal.h"
 
 #define LOG_PREFIX "hantek-dso2xxx"
+
+/**
+ * Hantek DSO2xxx packet header.
+ * All fields are ASCII-encoded decimal strings (NOT null-terminated).
+ * Total size: 128 bytes.
+ */
+typedef struct __attribute__((packed)) {
+    char magic[2];            /* data[0-1]:      Packet identifier, always "#9" */
+    char packet_length[9];    /* data[2-10]:     Byte length of current packet */
+    char total_length[9];     /* data[11-19]:    Total byte length of all data */
+    char uploaded_length[9];  /* data[20-28]:    Byte length of uploaded data */
+    char run_status;          /* data[29]:       Current running status */
+    char trigger_status;      /* data[30]:       Trigger status */
+    char ch1_offset[4];       /* data[31-34]:    Channel 1 vertical offset */
+    char ch2_offset[4];       /* data[35-38]:    Channel 2 vertical offset */
+    char ch3_offset[4];       /* data[39-42]:    Channel 3 vertical offset */
+    char ch4_offset[4];       /* data[43-46]:    Channel 4 vertical offset */
+    char ch1_voltage[7];      /* data[47-53]:    Channel 1 voltage scale */
+    char ch2_voltage[7];      /* data[54-60]:    Channel 2 voltage scale */
+    char ch3_voltage[7];      /* data[61-67]:    Channel 3 voltage scale */
+    char ch4_voltage[7];      /* data[68-74]:    Channel 4 voltage scale */
+    char ch_enable[4];        /* data[75-78]:    Channel enable flags (CH1-CH4, one char each) */
+    char sample_rate[9];      /* data[79-87]:    Sampling rate */
+    char sample_multiple[6];  /* data[88-93]:    Sampling multiple */
+    char trigger_time[9];     /* data[94-102]:   Display trigger time of current frame */
+    char acq_start_time[9];   /* data[103-111]:  Acquisition start time point of current frame */
+    char reserved[16];        /* data[112-127]:  Reserved */
+} hantek_packet_header_t;
+
+_Static_assert(sizeof(hantek_packet_header_t) == 128,
+               "hantek_packet_header_t must be exactly 128 bytes");
+
 
 /** Magic bytes at the start of every frame: ASCII "HTK2". */
 #define HANTEK_FRAME_MAGIC     0x32KTH  /* little-endian: 'H','T','K','2' */
