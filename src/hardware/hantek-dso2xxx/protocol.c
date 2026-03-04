@@ -148,6 +148,10 @@ SR_PRIV void hantek_dso2xxx_tcp_close(const struct sr_dev_inst *sdi)
 	}
 }
 
+
+/* Writes outside the character vector, but not outside the buffer */
+#define terminate_and_atoi(field) ( field[ sizeof(field) ] = 0, atol(field) )
+
 /**
  * Read one complete waveform frame from the scope and dispatch
  * SR_DF_ANALOG packets for each enabled channel.
@@ -160,12 +164,14 @@ SR_PRIV int hantek_dso2xxx_receive_frame(const struct sr_dev_inst *sdi)
 {
 	struct dev_context      *devc     = sdi->priv;
 	struct hantek_frame_header hdr;
+	char buffer_bytes[HANTEK_BLOCK_SIZE];
 	int8_t                  *raw_buf  = NULL;
 	float                   *float_buf = NULL;
 	int                      ret      = SR_ERR;
 	uint32_t                 ns;
 	size_t                   ch_bytes;
-	uint32_t                 i;
+	int channels;
+	int                 i;
 
 	/* ------------------------------------------------------------------ *
 	 * 1.  Read and validate the frame header.                             *
@@ -175,56 +181,42 @@ SR_PRIV int hantek_dso2xxx_receive_frame(const struct sr_dev_inst *sdi)
 		return SR_ERR_IO;
 	}
 
-	if (GUINT32_FROM_LE(hdr.magic) != HANTEK_FRAME_MAGIC_LE) {
-		sr_err("Bad frame magic: 0x%08X (expected 0x%08X)",
-		       GUINT32_FROM_LE(hdr.magic), HANTEK_FRAME_MAGIC_LE);
+	if (hdr.magic[0] != '#' ||
+			hdr.magic[1] != '9') {
+		sr_err("Bad frame magic: 0x%02X 0x%02X",
+		       hdr.magic[0], hdr.magic[1]);
 		return SR_ERR_DATA;
 	}
 
-	/* Byte-swap all fields from little-endian to host order. */
-	ns = GUINT32_FROM_LE(hdr.num_samples);
-	if (ns == 0 || ns > 8 * 1024 * 1024) {
-		sr_err("Implausible sample count: %u", ns);
-		return SR_ERR_DATA;
+	channels = 0;
+
+	/* Needs to be in last-to-first order as atoi needs NUL-terminated input!
+	 * (strtol does, too, and sscanf with field lengths tries locales and
+	 * other stuff we don't want.) */
+
+	devc->sample_rate = terminate_and_atoi(hdr.sample_rate);
+	devc->sample_period = 1.0/devc->sample_rate;
+
+	for(i = HANTEK_CHANNELS-1; i>= 0; i--) {
+		devc->ch_enabled[i] = hdr.ch_enable[i] == '1';
+		if (devc->ch_enabled[i])
+			channels++;
 	}
 
-	/*
-	 * The float fields are transmitted in the endianness of the scope's
-	 * ARM CPU (little-endian).  On little-endian hosts this is a no-op;
-	 * on big-endian hosts we byte-swap via the 32-bit integer trick.
-	 */
-#if G_BYTE_ORDER == G_BIG_ENDIAN
-	{
-		uint32_t tmp;
-# define BSWAP_FLOAT(f) do { memcpy(&tmp, &(f), 4); \
-		tmp = GUINT32_SWAP_LE_BE(tmp);         \
-		memcpy(&(f), &tmp, 4); } while (0)
-		BSWAP_FLOAT(hdr.sample_period);
-		BSWAP_FLOAT(hdr.time_per_div);
-		BSWAP_FLOAT(hdr.ch1_scale);
-		BSWAP_FLOAT(hdr.ch2_scale);
-# undef BSWAP_FLOAT
-		hdr.ch1_offset_raw = (int32_t)GUINT32_SWAP_LE_BE(
-		                         (uint32_t)hdr.ch1_offset_raw);
-		hdr.ch2_offset_raw = (int32_t)GUINT32_SWAP_LE_BE(
-		                         (uint32_t)hdr.ch2_offset_raw);
+	for(i = HANTEK_CHANNELS-1; i>= 0; i--) {
+		devc->ch_scale[i] = terminate_and_atoi( hdr.ch_voltage[i] );
 	}
-#endif
+	for(i = HANTEK_CHANNELS-1; i>= 0; i--) {
+		devc->ch_offset[i] = terminate_and_atoi( hdr.ch_offset[i] );
+	}
 
-	/* Cache header metadata in device context for later inspection. */
-	devc->num_samples    = ns;
-	devc->sample_period  = hdr.sample_period;
-	devc->ch1_enabled    = hdr.ch1_enabled;
-	devc->ch2_enabled    = hdr.ch2_enabled;
-	devc->ch1_scale      = hdr.ch1_scale;
-	devc->ch2_scale      = hdr.ch2_scale;
-	devc->ch1_offset_raw = hdr.ch1_offset_raw;
-	devc->ch2_offset_raw = hdr.ch2_offset_raw;
+	devc->num_samples = terminate_and_atoi(hdr.total_length) / channels;
 
-	sr_dbg("Frame: %u samples, period=%.3e s, CH1=%s CH2=%s",
-	       ns, hdr.sample_period,
-	       hdr.ch1_enabled ? "on" : "off",
-	       hdr.ch2_enabled ? "on" : "off");
+	sr_dbg("Frame: %u samples, rate=%.3e s, CH1=%s CH2=%s",
+	       devc->num_samples,
+	       (float)devc->sample_rate,
+	       devc->ch_enabled[0] ? "on" : "off",
+	       devc->ch_enabled[1] ? "on" : "off");
 
 	/* ------------------------------------------------------------------ *
 	 * 2.  Allocate receive and conversion buffers.                        *

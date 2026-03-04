@@ -11,8 +11,8 @@ Initial contents generated via Claude.AI, https://claude.ai/chat/b934e60d-d427-4
 
 ## How it works
 
-The patched firmware (quick-fetch.so, LD_PRELOAD'd on the scope) listens
-on a TCP port. When the user presses SAVE TO USB the scope freezes the
+The patched firmware (quick-fetch.so, `LD_PRELOAD`'d on the scope) listens
+on a TCP port. When the user presses `SAVE_TO_USB` the scope freezes the
 current waveform and streams a compact binary frame to any connected client.
 
 Binary frame layout (all fields little-endian):

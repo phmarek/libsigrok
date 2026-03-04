@@ -29,14 +29,14 @@
  * TCP to the scope's IP address (requires DavidAlfa's USB-networking kernel
  * image, which exposes the scope at 192.168.7.1 by default).
  *
- * Because no SCPI or serial scan is possible, scan() always returns exactly
- * one virtual device when a conn= option is provided:
+ * No SCPI or serial scan is possible; scan() accepts a conn= option,
+ * but will try the default IP/port as well.
  *
- *   sigrok-cli -d hantek-dso2xxx:conn=192.168.7.1/5025 --continuous
+ *   sigrok-cli -d hantek-dso2xxx:conn=192.168.7.1/5025
  *
  * No configurable scan/acquisition options are exposed (the driver follows
- * all scope settings passively).  Waveform capture is triggered by pressing
- * the SAVE TO USB button on the instrument.
+ * all scope settings passively). Waveform capture is triggered by pressing
+ * the SAVE TO USB button on the instrument, sigrok can ask for frames as well, though.
  *
  * Driver architecture
  * -------------------
@@ -52,6 +52,10 @@
 #include <config.h>
 #include <string.h>
 #include <glib.h>
+
+       #include <sys/types.h>
+       #include <sys/socket.h>
+       #include <netdb.h>
 #include <libsigrok/libsigrok.h>
 #include "libsigrok-internal.h"
 #include "protocol.h"
@@ -269,14 +273,14 @@ static int receive_data(int fd, int revents, void *cb_data)
 
 	if (revents & (G_IO_ERR | G_IO_HUP)) {
 		sr_err("Socket error / hangup during acquisition.");
-		dev_acquisition_stop((struct sr_dev_inst *)sdi);
+		sr_dev_acquisition_stop((struct sr_dev_inst *)sdi);
 		return FALSE;
 	}
 
 	if (revents & G_IO_IN) {
 		if (hantek_dso2xxx_receive_frame(sdi) != SR_OK) {
 			sr_err("Frame receive failed; stopping acquisition.");
-			dev_acquisition_stop((struct sr_dev_inst *)sdi);
+			sr_dev_acquisition_stop((struct sr_dev_inst *)sdi);
 			return FALSE;
 		}
 	}
