@@ -52,28 +52,35 @@
  * Total size: 128 bytes.
  */
 struct __attribute__((packed)) hantek_frame_header {
-    char magic[2];            /* data[0-1]:      Packet identifier, always "#9" */
-    char packet_length[9];    /* data[2-10]:     Byte length of current packet */
-    char total_length[9];     /* data[11-19]:    Total byte length of all data */
-    char uploaded_length[9];  /* data[20-28]:    Byte length of uploaded data */
-    char run_status;          /* data[29]:       Current running status */
-    char trigger_status;      /* data[30]:       Trigger status */
-    char ch_offset[HANTEK_CHANNELS][4];     /* data[31-34]:    Channel 1 vertical offset */
-         /* data[35-38]:    Channel 2 vertical offset */
-         /* data[39-42]:    Channel 3 vertical offset */
-         /* data[43-46]:    Channel 4 vertical offset */
-    char ch_voltage[HANTEK_CHANNELS][7];    /* data[47-53]:    Channel 1 voltage scale */
-          /* data[54-60]:    Channel 2 voltage scale */
-          /* data[61-67]:    Channel 3 voltage scale */
-          /* data[68-74]:    Channel 4 voltage scale */
-    char ch_enable[HANTEK_CHANNELS];        /* data[75-78]:    Channel enable flags (CH1-CH4, one char each) */
-    char sample_rate[9];      /* data[79-87]:    Sampling rate */
-    char sample_multiple[6];  /* data[88-93]:    Sampling multiple */
-    char trigger_time[9];     /* data[94-102]:   Display trigger time of current frame */
-    char acq_start_time[9];   /* data[103-111]:  Acquisition start time point of current frame */
-    char reserved[16];        /* data[112-127]:  Reserved */
+    char   magic[2];            /* data[0-1]:      Packet identifier, always "#9" */
+    char   packet_length[9];    /* data[2-10]:     Byte length of current packet */
+    char   total_length[9];     /* data[11-19]:    Total byte length of all data */
+    char   uploaded_length[9];  /* data[20-28]:    Byte length of uploaded data */
+    char   run_status;          /* data[29]:       Current running status */
+    char   trigger_status;      /* data[30]:       Trigger status */
+    char   unknown[8];          /* data[31-38]:       Unknown */
+    int8_t ch_offset[HANTEK_CHANNELS][2];     /* data[39-40] etc.: 16bit LE Channel offset */
+    char   ch_voltage[HANTEK_CHANNELS][7];    /* data[47-53] etc.: Channel voltage scale as float */
+    char   ch_enable[HANTEK_CHANNELS];        /* data[75-78]:    Channel enable flags (CH1-CH4, one char each) */
+    char   sample_rate[9];      /* data[79-87]:    Sampling rate */
+    char   sample_multiple[6];  /* data[88-93]:    Sampling multiple */
+    char   trigger_time[9];     /* data[94-102]:   Display trigger time of current frame */
+    char   acq_start_time[9];   /* data[103-111]:  Acquisition start time point of current frame */
+    char   reserved[16];        /* data[112-127]:  Reserved */
 };
 
+/*
+#9
+000004128
+000008000
+000000000
+0 0
+\0\302\353\v \0\0\0\000 2\0 \316\377 \0\0 \0\000
+1.0e+00 1.0e+00 1.0e+00 1.0e+00
+1100
+1.250e+06
+000001
+\0\0\0\0\0\0\0\0\0+0.00e+00000808\0\300\200\200\200\200\200\200\200\0
 /*
 #if sizeof(hantek_frame_header) == 128
 #error Wrong frame header definition
@@ -121,5 +128,6 @@ struct dev_context {
 SR_PRIV int  hantek_dso2xxx_tcp_connect(const struct sr_dev_inst *sdi);
 SR_PRIV void hantek_dso2xxx_tcp_close(const struct sr_dev_inst *sdi);
 SR_PRIV int  hantek_dso2xxx_receive_frame(const struct sr_dev_inst *sdi);
+SR_PRIV int hantek_dso2xxx_timesync(struct dev_context *devc);
 
 #endif /* LIBSIGROK_HARDWARE_HANTEK_DSO2XXX_PROTOCOL_H */

@@ -53,9 +53,9 @@
 #include <string.h>
 #include <glib.h>
 
-       #include <sys/types.h>
-       #include <sys/socket.h>
-       #include <netdb.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
 #include <libsigrok/libsigrok.h>
 #include "libsigrok-internal.h"
 #include "protocol.h"
@@ -97,6 +97,10 @@ static void parse_conn(const char *conn, char **addr_out, char **port_out)
 {
 	const char *sep;
 	char       *addr, *port;
+	const char tcp_raw[] = "tcp-raw/";
+
+	if (strncmp(conn, tcp_raw, sizeof(tcp_raw)-1) == 0)
+		conn += sizeof(tcp_raw)-1;
 
 	sep = strrchr(conn, '/');
 	if (!sep)
@@ -167,11 +171,13 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 
 static int dev_open(struct sr_dev_inst *sdi)
 {
+
 	if (hantek_dso2xxx_tcp_connect(sdi) != SR_OK)
 		return SR_ERR;
 
 	sdi->status = SR_ST_ACTIVE;
-	return SR_OK;
+
+	return hantek_dso2xxx_timesync(sdi->priv);
 }
 
 static int dev_close(struct sr_dev_inst *sdi)
