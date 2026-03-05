@@ -437,7 +437,7 @@ src_libdrivers_la_SOURCES += \
 	src/hardware/hantek-dso/api.c
 endif
 if HW_HANTEK_DSO2XXX
-libsigrok_la_SOURCES += \
+src_libdrivers_la_SOURCES += \
 	src/hardware/hantek-dso2xxx/api.c \
 	src/hardware/hantek-dso2xxx/protocol.c \
 	src/hardware/hantek-dso2xxx/protocol.h
