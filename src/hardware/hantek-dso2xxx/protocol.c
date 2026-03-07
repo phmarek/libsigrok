@@ -134,21 +134,38 @@ SR_PRIV int hantek_dso2xxx_tcp_connect(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
+SR_PRIV int hantek_dso2xxx_timeout(struct dev_context *devc)
+{
+	fd_set fds = { 0 };
+	struct timeval timeout = { .tv_sec = 1, .tv_usec = 0 }; /* TODO: configurable? */
+
+	FD_SET(devc->sockfd, &fds);
+	if (select(devc->sockfd+1, &fds, NULL, NULL, &timeout) == 1)
+		return SR_OK;
+	return SR_ERR;
+}
 
 /* Do a time sync */
 SR_PRIV int hantek_dso2xxx_timesync(struct dev_context *devc)
 {
+	const char thx[] = "thx\r\n";
 	char buffer[32];
-	size_t len;
+	ssize_t len;
 
 	len = sprintf(buffer, "time %ld\n", time(NULL));
-	write(devc->sockfd, buffer, len);
-	/* TODO: timeout */
-	read(devc->sockfd, buffer, sizeof(buffer));
+	if (write(devc->sockfd, buffer, len) != len)
+		return SR_ERR;
+	
+	if (hantek_dso2xxx_timeout(devc) != SR_OK)
+		return SR_ERR;
 
-	return strncmp(buffer, "thx\r\n", 4) == 0 ? SR_OK : SR_ERR_DATA;
+	len = read(devc->sockfd, buffer, sizeof(buffer));
+	/* Don't check ==, there may be an additional NUL byte */
+	if (len < (long)sizeof(thx) -1)
+		return SR_ERR;
+
+	return strcmp(buffer, thx) == 0 ? SR_OK : SR_ERR_DATA;
 }
-
 
 /**
  * Close the TCP connection.
@@ -186,7 +203,7 @@ SR_PRIV int hantek_dso2xxx_receive_frame(const struct sr_dev_inst *sdi)
 	int                      ret      = SR_ERR;
 	size_t                   ch_bytes;
 	uint32_t channels, sample_nr, ch;
-	int i;
+	int i, pos;
 	struct sr_channel *channel;
 	struct sr_datafeed_packet  pkt;
 	struct sr_datafeed_analog  analog;
@@ -234,11 +251,13 @@ SR_PRIV int hantek_dso2xxx_receive_frame(const struct sr_dev_inst *sdi)
 
 	devc->num_samples = terminate_and_atoi(hdr.total_length) / channels;
 
-	sr_dbg(LOG_PREFIX "Frame: %u samples, rate=%.3e s, CH1=%s CH2=%s",
+	sr_dbg(LOG_PREFIX "Frame: %u samples, rate=%.3e s, CH1=%s %f CH2=%s %f",
 	       devc->num_samples,
 	       (float)devc->sample_rate,
 	       devc->ch_enabled[0] ? "on" : "off",
-	       devc->ch_enabled[1] ? "on" : "off");
+	       devc->ch_scale[0],
+	       devc->ch_enabled[1] ? "on" : "off",
+	       devc->ch_scale[1]);
 
 	for(i = 0; i < HANTEK_CHANNELS; i++) {
 		if (devc->ch_enabled[i]) {
@@ -255,18 +274,24 @@ SR_PRIV int hantek_dso2xxx_receive_frame(const struct sr_dev_inst *sdi)
 	for(sample_nr = 0;
 			sample_nr < devc->num_samples;
 			sample_nr += ch_bytes) {
+
+		if (hantek_dso2xxx_timeout(devc) != SR_OK)
+			return SR_ERR;
+
 		if (tcp_read_all(devc->sockfd, byte_buffer, HANTEK_BLOCK_SIZE) != SR_OK) {
 			sr_err(LOG_PREFIX "Failed to read samples.");
 			return SR_ERR_IO;
 		}
 
+		pos = 0;
 		for(ch = 0; ch < HANTEK_CHANNELS; ch++) {
 			if (devc->ch_enabled[ch]) {
 				for(i = 0; i < ch_bytes; i++) {
 					float_buf[ch][sample_nr + i] =
-						(byte_buffer[i] - devc->ch_offset[ch])
+						(byte_buffer[pos] - devc->ch_offset[ch])
 						/ HANTEK_COUNTS_PER_DIV
 						* devc->ch_scale[ch];
+					pos++;
 				}
 			}
 		}

@@ -81,10 +81,6 @@ struct __attribute__((packed)) hantek_frame_header {
 1.250e+06
 000001
 \0\0\0\0\0\0\0\0\0+0.00e+00000808\0\300\200\200\200\200\200\200\200\0
-/*
-#if sizeof(hantek_frame_header) == 128
-#error Wrong frame header definition
-#endif
 */
 
 #define HANTEK_BLOCK_SIZE 4000
