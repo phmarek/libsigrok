@@ -34,11 +34,15 @@
 #ifndef LIBSIGROK_HARDWARE_HANTEK_DSO2XXX_PROTOCOL_H
 #define LIBSIGROK_HARDWARE_HANTEK_DSO2XXX_PROTOCOL_H
 
+#define _GNU_SOURCE
 #include <stdint.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <glib.h>
+
+#include <locale.h>
+
 #include <libsigrok/libsigrok.h>
 #include "libsigrok-internal.h"
 
@@ -74,13 +78,17 @@ struct __attribute__((packed)) hantek_frame_header {
 000004128
 000008000
 000000000
-0 0
-\0\302\353\v \0\0\0\000 2\0 \316\377 \0\0 \0\000
+0
+0
+\0\302\353\v \0\0\0\000
+2\0 \316\377 \0\0 \0\000
 1.0e+00 1.0e+00 1.0e+00 1.0e+00
 1100
 1.250e+06
 000001
-\0\0\0\0\0\0\0\0\0+0.00e+00000808\0\300\200\200\200\200\200\200\200\0
+\0\0\0\0\0\0\0\0\0
++0.00e+00
+000808\0\300\200\200\200\200\200\200\200\0
 */
 
 #define HANTEK_BLOCK_SIZE 4000
@@ -112,11 +120,11 @@ struct dev_context {
 	/* Channel metadata filled in from the most recent header */
 	uint32_t num_samples;
 
-	float    sample_period;   /**< 1 / samplerate */
+	double   sample_period;   /**< 1 / samplerate */
 	uint32_t sample_rate;
 
 	uint8_t  ch_enabled[HANTEK_CHANNELS];
-	float    ch_offset[HANTEK_CHANNELS];
+	int16_t  ch_offset[HANTEK_CHANNELS];
 	float    ch_scale[HANTEK_CHANNELS];
 };
 
@@ -125,5 +133,11 @@ SR_PRIV int  hantek_dso2xxx_tcp_connect(const struct sr_dev_inst *sdi);
 SR_PRIV void hantek_dso2xxx_tcp_close(const struct sr_dev_inst *sdi);
 SR_PRIV int  hantek_dso2xxx_receive_frame(const struct sr_dev_inst *sdi);
 SR_PRIV int hantek_dso2xxx_timesync(struct dev_context *devc);
+SR_PRIV int hantek_dso2xxx_acq_now(struct dev_context *devc);
+SR_PRIV int drv_init(struct sr_dev_driver *di, struct sr_context *sr_ctx);
+SR_PRIV int hantek_dso2xxx_timeout(struct dev_context *devc);
+SR_PRIV double atof_for_C_locale(const char *input);
+
+extern locale_t hantek_dso2xxx_c_locale;
 
 #endif /* LIBSIGROK_HARDWARE_HANTEK_DSO2XXX_PROTOCOL_H */

@@ -37,6 +37,8 @@
  * header to detect the next waveform.
  */
 
+#include "protocol.h"
+
 #include <config.h>
 #include <errno.h>
 #include <string.h>
@@ -44,15 +46,16 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <locale.h>
 #include <netinet/tcp.h>
 #include <glib.h>
+#include <stdlib.h>
 #include <libsigrok/libsigrok.h>
 #include "libsigrok-internal.h"
-#include "protocol.h"
 
-/* --------------------------------------------------------------------------
- * Helpers
- * -------------------------------------------------------------------------- */
+
+locale_t hantek_dso2xxx_c_locale;
+
 
 /**
  * Perform a full blocking read of exactly @p len bytes into @p buf.
@@ -81,9 +84,25 @@ static int tcp_read_all(int fd, void *buf, size_t len)
 	return SR_OK;
 }
 
-/* --------------------------------------------------------------------------
- * Public API
- * -------------------------------------------------------------------------- */
+SR_PRIV void send_session_update(const struct sr_dev_inst *sdi,
+		int what, GVariant *value)
+{
+    struct sr_datafeed_packet packet;
+    struct sr_datafeed_meta   meta;
+    struct sr_config         *cfg;
+
+    cfg = sr_config_new(what, value);
+
+    meta.config = g_slist_append(NULL, cfg);
+
+    packet.type    = SR_DF_META;
+    packet.payload = &meta;
+
+    sr_session_send(sdi, &packet);
+
+    g_slist_free(meta.config);
+    sr_config_free(cfg);
+}
 
 /**
  * Open a TCP connection to the scope.
@@ -145,6 +164,16 @@ SR_PRIV int hantek_dso2xxx_timeout(struct dev_context *devc)
 	return SR_ERR;
 }
 
+SR_PRIV int hantek_dso2xxx_acq_now(struct dev_context *devc)
+{
+	const char now[] = "now\r\n";
+	const int len = sizeof(now) -1;
+
+	if (write(devc->sockfd, now, len) != len)
+		return SR_ERR;
+	return SR_OK;
+}
+
 /* Do a time sync */
 SR_PRIV int hantek_dso2xxx_timesync(struct dev_context *devc)
 {
@@ -159,12 +188,12 @@ SR_PRIV int hantek_dso2xxx_timesync(struct dev_context *devc)
 	if (hantek_dso2xxx_timeout(devc) != SR_OK)
 		return SR_ERR;
 
-	len = read(devc->sockfd, buffer, sizeof(buffer));
+	len = read(devc->sockfd, buffer, sizeof(buffer)-1);
 	/* Don't check ==, there may be an additional NUL byte */
 	if (len < (long)sizeof(thx) -1)
 		return SR_ERR;
 
-	return strcmp(buffer, thx) == 0 ? SR_OK : SR_ERR_DATA;
+	return (strncmp(buffer, thx, len) == 0) ? SR_OK : SR_ERR_DATA;
 }
 
 /**
@@ -181,6 +210,11 @@ SR_PRIV void hantek_dso2xxx_tcp_close(const struct sr_dev_inst *sdi)
 	}
 }
 
+
+SR_PRIV double atof_for_C_locale(const char *input)
+{
+	return strtod_l(input, NULL, hantek_dso2xxx_c_locale);
+}
 
 /* Writes outside the character vector, but not outside the buffer */
 #define terminate_and_conv(field, fn) ( field[ sizeof(field) ] = 0, fn(field) )
@@ -233,8 +267,12 @@ SR_PRIV int hantek_dso2xxx_receive_frame(const struct sr_dev_inst *sdi)
 	 * (strtol does, too, and sscanf with field lengths tries locales and
 	 * other stuff we don't want.) */
 
-	devc->sample_rate = terminate_and_conv(hdr.sample_rate, atof);
+	devc->sample_rate = terminate_and_conv(hdr.sample_rate, atof_for_C_locale);
 	devc->sample_period = 1.0/devc->sample_rate;
+
+	send_session_update(sdi,
+			SR_CONF_SAMPLERATE,
+			g_variant_new_uint64(devc->sample_rate));
 
 	for(i = HANTEK_CHANNELS-1; i>= 0; i--) {
 		devc->ch_enabled[i] = hdr.ch_enable[i] == '1';
@@ -243,21 +281,23 @@ SR_PRIV int hantek_dso2xxx_receive_frame(const struct sr_dev_inst *sdi)
 	}
 
 	for(i = HANTEK_CHANNELS-1; i>= 0; i--) {
-		devc->ch_scale[i] = terminate_and_conv( hdr.ch_voltage[i], atof);
+		devc->ch_scale[i] = terminate_and_conv( hdr.ch_voltage[i], atof_for_C_locale);
 	}
 	for(i = HANTEK_CHANNELS-1; i>= 0; i--) {
-		devc->ch_offset[i] = hdr.ch_offset[i][0] + ( hdr.ch_offset[i][1] << 8);
+		devc->ch_offset[i] = hdr.ch_offset[i][0] | ( hdr.ch_offset[i][1] << 8);
 	}
 
 	devc->num_samples = terminate_and_atoi(hdr.total_length) / channels;
 
-	sr_dbg(LOG_PREFIX "Frame: %u samples, rate=%.3e s, CH1=%s %f CH2=%s %f",
+	sr_dbg(LOG_PREFIX "Frame: %u samples, rate=%.3e s, CH1=%s/%.1f%+d CH2=%s/%.1f%+d",
 	       devc->num_samples,
 	       (float)devc->sample_rate,
 	       devc->ch_enabled[0] ? "on" : "off",
 	       devc->ch_scale[0],
+	       devc->ch_offset[0],
 	       devc->ch_enabled[1] ? "on" : "off",
-	       devc->ch_scale[1]);
+	       devc->ch_scale[1],
+	       devc->ch_offset[1]);
 
 	for(i = 0; i < HANTEK_CHANNELS; i++) {
 		if (devc->ch_enabled[i]) {
@@ -289,8 +329,8 @@ SR_PRIV int hantek_dso2xxx_receive_frame(const struct sr_dev_inst *sdi)
 				for(i = 0; i < ch_bytes; i++) {
 					float_buf[ch][sample_nr + i] =
 						(byte_buffer[pos] - devc->ch_offset[ch])
-						/ HANTEK_COUNTS_PER_DIV
-						* devc->ch_scale[ch];
+						* devc->ch_scale[ch] 
+						/ HANTEK_COUNTS_PER_DIV;
 					pos++;
 				}
 			}

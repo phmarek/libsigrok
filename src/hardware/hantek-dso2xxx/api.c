@@ -40,6 +40,7 @@
  */
 
 #define _GNU_SOURCE
+#include "protocol.h"
 #include <config.h>
 #include <string.h>
 #include <glib.h>
@@ -50,7 +51,6 @@
 #include <stdio.h>
 #include <libsigrok/libsigrok.h>
 #include "libsigrok-internal.h"
-#include "protocol.h"
 
 /* --------------------------------------------------------------------------
  * Static driver metadata
@@ -71,7 +71,7 @@ static const uint32_t drvopts[] = {
 static const uint32_t devopts[] = {
 	SR_CONF_CONN | SR_CONF_GET,
 	SR_CONF_LIMIT_FRAMES | SR_CONF_GET | SR_CONF_SET,
-	SR_CONF_SAMPLERATE | SR_CONF_GET,
+	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET,
 };
 
 /* --------------------------------------------------------------------------
@@ -217,11 +217,7 @@ static int config_get(uint32_t key, GVariant **data,
 		                             devc->tcp_port);
 		break;
 	case SR_CONF_SAMPLERATE:
-		if (devc->sample_period > 0.0f)
-			*data = g_variant_new_uint64(
-			            (uint64_t)(1.0f / devc->sample_period));
-		else
-			*data = g_variant_new_uint64(0);
+		*data = g_variant_new_uint64(devc->sample_rate);
 		break;
 	case SR_CONF_LIMIT_FRAMES:
 		*data = g_variant_new_uint64(devc->frames_received);
@@ -316,6 +312,8 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		return SR_ERR;
 	if (hantek_dso2xxx_timesync(devc) != SR_OK)
 		return SR_ERR;
+	if (hantek_dso2xxx_acq_now(devc) != SR_OK)
+		return SR_ERR;
 
 	devc->acq_running    = TRUE;
 	devc->frames_received = 0;
@@ -354,6 +352,12 @@ static int dev_acquisition_stop(struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
+SR_PRIV int drv_init(struct sr_dev_driver *di, struct sr_context *sr_ctx)
+{
+	hantek_dso2xxx_c_locale = newlocale(LC_ALL_MASK, "C", NULL);
+	return std_init(di, sr_ctx);
+}
+
 /* --------------------------------------------------------------------------
  * Driver instance definition
  * -------------------------------------------------------------------------- */
@@ -362,7 +366,7 @@ static struct sr_dev_driver hantek_dso2xxx_driver_info = {
 	.name             = "hantek-dso2xxx",
 	.longname         = "Hantek DSO2xxx (quick-fetch)",
 	.api_version      = 1,
-	.init             = std_init,
+	.init             = drv_init,
 	.cleanup          = std_cleanup,
 	.scan             = scan,
 	.dev_list         = std_dev_list,
